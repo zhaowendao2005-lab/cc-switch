@@ -33,6 +33,17 @@ pub use prompt::import_prompt_from_deeplink;
 pub use provider::{import_provider_from_deeplink, parse_and_merge_config};
 pub use skill::import_skill_from_deeplink;
 
+/// 本 fork 注册的深链接协议。
+pub const DEEPLINK_SCHEME: &str = "ccswitchmod";
+/// 官方版协议；解析器继续接受，避免已有 ccswitch:// 链接失效。
+/// 注意：只有 DEEPLINK_SCHEME 会注册到操作系统。
+pub const LEGACY_DEEPLINK_SCHEME: &str = "ccswitch";
+
+/// 判断 URL 是否属于本应用需要处理的深链接。
+pub fn is_deeplink_url(url: &str) -> bool {
+    url.starts_with("ccswitchmod://") || url.starts_with("ccswitch://")
+}
+
 /// 等前端处理的深链接（解析结果或解析错误）
 ///
 /// 链接经常在前端还没注册监听时到达：冷启动、轻量模式重建窗口。事件一发出去就没了，

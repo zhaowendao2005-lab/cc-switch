@@ -104,13 +104,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
       if (!displayVersion) {
         await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
+          "https://github.com/zhaowendao2005-lab/cc-switch/releases",
         );
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
+        `https://github.com/zhaowendao2005-lab/cc-switch/releases/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
@@ -119,7 +119,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   }, [t, updateInfo?.availableVersion, version]);
 
   const handleOpenGithub = useCallback(() => {
-    void settingsApi.openExternal("https://github.com/farion1231/cc-switch");
+    void settingsApi.openExternal(
+      "https://github.com/zhaowendao2005-lab/cc-switch",
+    );
   }, []);
 
   const handleDismissStarPrompt = useCallback(() => {
@@ -204,7 +206,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           className="h-10 w-10 shrink-0 p-1"
         />
         <div className="min-w-0 flex-1">
-          <div className="text-title text-fg-1">CC Switch</div>
+          <div className="text-title text-fg-1">CC Switch Mod</div>
           <div className="flex flex-wrap items-center gap-2 text-caption text-fg-2">
             {isLoadingVersion ? (
               <Loader2 className="h-3 w-3 animate-spin" />
