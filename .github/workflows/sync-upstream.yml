@@ -1,0 +1,123 @@
+# 自动跟随上游 farion1231/cc-switch 的最新正式版。
+#
+# 只跟随 GitHub Releases 中的正式版（/releases/latest 会自动排除 prerelease 和 draft），
+# 不追 upstream main 上的每个提交。同步完成后在 fork 上打 sync/<tag> 标记，
+# 下一次运行据此判断是否已经处理过。
+#
+# 冲突策略：中止合并、保持 main 不变、开 issue 并让 job 失败。不会用 -X ours 静默覆盖上游。
+name: Sync upstream stable
+
+on:
+  schedule:
+    # 每 30 分钟检查一次。GitHub 的 cron 在高峰期可能延迟几分钟到几十分钟。
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to sync (leave empty for latest stable release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # 防止有人把仓库转成非预期仓库后误跑
+    if: github.repository == 'zhaowendao2005-lab/cc-switch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPSTREAM: farion1231/cc-switch
+      INPUT_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve upstream tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          fi
+          test -n "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Upstream target: $tag"
+
+      - name: Skip if already synced
+        id: check
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          tag="${{ steps.resolve.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/sync/$tag" >/dev/null; then
+            echo "Already synced: $tag"
+            echo "synced=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream release
+        if: steps.check.outputs.synced == 'false'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+
+          git remote add upstream "https://github.com/$UPSTREAM.git" 2>/dev/null || true
+          # 上游 tag 存到 upstream-<tag>，避免与 sync/<tag> 混淆
+          git fetch --no-tags --force upstream "+refs/tags/$tag:refs/tags/upstream-$tag"
+
+          if ! git merge --no-edit "refs/tags/upstream-$tag"; then
+            git merge --abort || true
+
+            # 用带引号的 heredoc，避免正文里的反引号被 shell 当成命令替换
+            cat > /tmp/conflict.md <<'EOF'
+          自动同步上游 __TAG__ 时发生合并冲突，已中止，`main` 未改动。
+
+          请手动处理：
+
+          ```bash
+          git fetch --no-tags upstream "+refs/tags/__TAG__:refs/tags/upstream-__TAG__"
+          git merge refs/tags/upstream-__TAG__
+          ```
+
+          解决冲突后提交并推送，再执行一次本 workflow（或手动打 `sync/__TAG__` tag），避免下次重复合并。
+
+          运行记录：__RUN_URL__
+          EOF
+
+            # 占位符替换，避免 heredoc 展开反引号和 $()
+            sed -i \
+              -e "s|__TAG__|$tag|g" \
+              -e "s|__RUN_URL__|$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID|g" \
+              /tmp/conflict.md
+
+            gh issue create \
+              --title "上游正式版 $tag 合并冲突" \
+              --body-file /tmp/conflict.md
+            exit 1
+          fi
+
+          git push origin main
+
+          # 标记这个上游版本已经同步过；只在成功合并后打
+          git tag "sync/$tag"
+          git push origin "sync/$tag"
+          echo "Merged upstream $tag and tagged sync/$tag"
