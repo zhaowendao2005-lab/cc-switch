@@ -2819,7 +2819,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let backup_dir = crate::config::get_app_config_dir().join("backups");
-        let stale_path = backup_dir.join("stale-unprotected.db");
+        let stale_path = backup_dir.join("db_backup_stale-unprotected.db");
         std::fs::write(&stale_path, b"stale").map_err(|e| AppError::io(&stale_path, e))?;
 
         {
