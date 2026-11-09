@@ -585,7 +585,7 @@ impl Database {
         let mut cleanup_protected = Vec::with_capacity(protected_paths.len() + 1);
         cleanup_protected.push(backup_path.as_path());
         cleanup_protected.extend_from_slice(protected_paths);
-        Self::cleanup_db_backups(&backup_dir, &cleanup_protected)?;
+        Self::cleanup_db_backups(&backup_dir, prefix, &cleanup_protected)?;
         Ok(Some(backup_path))
     }
 
@@ -615,18 +615,26 @@ impl Database {
         }
     }
 
-    /// 清理旧的数据库备份，保留最新的 N 个
-    fn cleanup_db_backups(dir: &Path, protected_paths: &[&Path]) -> Result<(), AppError> {
+    /// 清理旧的数据库备份，按前缀分别保留最新的 N 个。
+    ///
+    /// 主库备份（`db_backup_*`）和备用库备份（`mod_db_backup_*`）必须各自
+    /// 独立计数，避免一方的备份把另一方挤出保留窗口。
+    fn cleanup_db_backups(
+        dir: &Path,
+        prefix: &str,
+        protected_paths: &[&Path],
+    ) -> Result<(), AppError> {
         let retain = crate::settings::effective_backup_retain_count();
         let entries = match fs::read_dir(dir) {
             Ok(iter) => iter
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {
-                    entry
-                        .path()
-                        .extension()
-                        .map(|ext| ext == "db")
-                        .unwrap_or(false)
+                    let path = entry.path();
+                    let matches_prefix = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(prefix));
+                    matches_prefix && path.extension().map(|ext| ext == "db").unwrap_or(false)
                 })
                 .collect::<Vec<_>>(),
             Err(_) => return Ok(()),
@@ -2863,6 +2871,51 @@ mod tests {
             safety_provider, "live-before-restore",
             "safety backup must exactly represent the live state being replaced"
         );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn retention_counts_primary_and_fallback_backups_separately() -> Result<(), AppError> {
+        let _test_home = TestHomeGuard::new();
+        let _settings = SettingsGuard::with_backup_retain_count(2);
+        let dir = tempfile::tempdir().expect("create temp backup dir");
+        let dir_path = dir.path();
+        for name in [
+            "db_backup_20260101_000001.db",
+            "db_backup_20260101_000002.db",
+            "db_backup_20260101_000003.db",
+            "mod_db_backup_20260101_000001.db",
+            "mod_db_backup_20260101_000002.db",
+            "mod_db_backup_20260101_000003.db",
+        ] {
+            std::fs::write(dir_path.join(name), b"x").expect("write backup sentinel");
+        }
+
+        let count = |prefix: &str| -> usize {
+            std::fs::read_dir(dir_path)
+                .expect("read backup dir")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(prefix))
+                })
+                .count()
+        };
+
+        Database::cleanup_db_backups(dir_path, "db_backup_", &[])?;
+        assert_eq!(count("db_backup_"), 2, "primary retention keeps two");
+        assert_eq!(
+            count("mod_db_backup_"),
+            3,
+            "primary cleanup must not touch fallback backups"
+        );
+
+        Database::cleanup_db_backups(dir_path, "mod_db_backup_", &[])?;
+        assert_eq!(count("db_backup_"), 2, "primary backups stay intact");
+        assert_eq!(count("mod_db_backup_"), 2, "fallback retention keeps two");
         Ok(())
     }
 
