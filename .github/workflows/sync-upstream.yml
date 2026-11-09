@@ -21,6 +21,8 @@ on:
 permissions:
   contents: write
   issues: write
+  # workflow_dispatch 是 GITHUB_TOKEN 可以触发新运行的例外，需要 actions: write
+  actions: write
 
 concurrency:
   group: sync-upstream
@@ -121,3 +123,55 @@ jobs:
           git tag "sync/$tag"
           git push origin "sync/$tag"
           echo "Merged upstream $tag and tagged sync/$tag"
+
+      - name: Bump mod version
+        if: steps.check.outputs.synced == 'false'
+        id: bump
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          node scripts/bump-mod-version.mjs "$tag"
+          git add -A package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json src/whats-new
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            version="${tag#v}"
+            git commit -m "chore(release): $version"
+            git push origin main
+          fi
+
+      - name: Tag release
+        if: steps.check.outputs.synced == 'false'
+        id: release_tag
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve.outputs.tag }}"
+          version="${tag#v}"
+          release_tag="mod-v$version"
+          if git rev-parse -q --verify "refs/tags/$release_tag" >/dev/null; then
+            echo "Tag $release_tag already exists"
+          else
+            git tag "$release_tag"
+            git push origin "$release_tag"
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN 不能触发 push 事件，但 workflow_dispatch 是明确例外。
+      - name: Dispatch release
+        if: steps.check.outputs.synced == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_tag="${{ steps.release_tag.outputs.tag }}"
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $release_tag already exists; skipping dispatch."
+            exit 0
+          fi
+          gh workflow run release-mod.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f tag="$release_tag" \
+            -f publish=true
+          echo "Dispatched release-mod.yml for $release_tag"

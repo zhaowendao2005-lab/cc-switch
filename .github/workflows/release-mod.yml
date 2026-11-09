@@ -1,0 +1,591 @@
+# Fork 专用发布流水线：Windows x64 + Windows ARM64 + macOS universal。
+#
+# 与上游 release.yml 分开维护，避免每次跟随上游都产生冲突。上游 release.yml 保留在仓库中
+# 但不使用；本 fork 只推送 `mod-v*` tag。
+#
+# macOS 不做 Apple 签名/公证（没有开发者账号），使用 ad-hoc 签名（APPLE_SIGNING_IDENTITY="-"）。
+# Tauri 的更新签名（minisign）与 Apple 签名无关，仍然由 TAURI_SIGNING_PRIVATE_KEY 完成。
+name: Release Mod
+
+on:
+  push:
+    tags:
+      - 'mod-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. mod-v4.0.28)'
+        required: true
+        type: string
+      publish:
+        description: 'Create the GitHub release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-mod-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  version-check:
+    name: Check version files
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
+
+      - name: Require an existing tag when publishing
+        if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG does not exist. Push the mod-v* tag instead of dispatching a publish run."
+            exit 1
+          fi
+
+      - name: Verify version files match the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#mod-v}"
+          echo "Version: $VERSION"
+          fail=0
+          check() {
+            local file="$1" pattern="$2"
+            if ! grep -qE "$pattern" "$file"; then
+              echo "::error file=$file::Version in $file does not match $VERSION (pattern: $pattern)"
+              fail=1
+            fi
+          }
+          check package.json "\"version\"[[:space:]]*:[[:space:]]*\"$VERSION\""
+          check src-tauri/Cargo.toml "^version[[:space:]]*=[[:space:]]*\"$VERSION\""
+          check src-tauri/tauri.conf.json "\"version\"[[:space:]]*:[[:space:]]*\"$VERSION\""
+          if [ ! -f "src/whats-new/$VERSION.json" ]; then
+            echo "::error file=src/whats-new/$VERSION.json::Missing in-app what's new summary"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+
+  whats-new-check:
+    name: Validate what's new summaries
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate all summaries
+        run: pnpm vitest run tests/config/whatsNewEntries.test.ts
+
+  windows:
+    name: Build Windows (${{ matrix.arch || 'x86_64' }})
+    needs: [version-check, whats-new-check]
+    runs-on: ${{ matrix.os }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: x86_64
+          - os: windows-11-arm
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      # rust-toolchain.toml 是编译器版本的唯一来源
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - name: Add Windows ARM64 target
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: rustup target add aarch64-pc-windows-msvc
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Setup LLVM for Windows ARM64
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $llvmRoot = 'C:\Program Files\LLVM'
+          if (-not (Test-Path $llvmRoot)) {
+            throw "LLVM not found at $llvmRoot"
+          }
+          $llvmBin = Join-Path $llvmRoot 'bin'
+          "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CLANG_PATH=$(Join-Path $llvmBin 'clang.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare Tauri signing key
+        uses: ./.github/actions/prepare-tauri-signing-key
+        with:
+          private-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Build Tauri App
+        shell: pwsh
+        env:
+          WINDOWS_RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
+            pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
+          } else {
+            pnpm tauri build --bundles msi
+          }
+
+      - name: Prepare Windows Assets
+        shell: pwsh
+        env:
+          WINDOWS_RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $VERSION = $env:TAG -replace '^mod-v', ''
+          $isArm64 = $env:WINDOWS_RELEASE_ARCH -eq 'arm64'
+          $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/release' }
+          $assetSuffix = if ($isArm64) { '-arm64' } else { '' }
+
+          $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/msi') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $msi) {
+            $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if ($null -eq $msi) {
+            throw "No Windows MSI installer found ($env:WINDOWS_RELEASE_ARCH)"
+          }
+
+          # #8534：MSI 必须带 REBOOT=ReallySuppress，否则文件被占用时可能直接重启系统
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi.FullName, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `Value` FROM `Property` WHERE `Property`=''REBOOT'''))
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+          $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+          $reboot = if ($null -ne $record) { $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1) } else { $null }
+          $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
+          if ($reboot -ne 'ReallySuppress') {
+            throw "MSI Property table must set REBOOT=ReallySuppress (found: '$reboot') - see #8534"
+          }
+
+          $dest = "CC-Switch-Mod-$VERSION-Windows$assetSuffix.msi"
+          Copy-Item $msi.FullName (Join-Path release-assets $dest)
+          $sigPath = "$($msi.FullName).sig"
+          if (-not (Test-Path $sigPath)) {
+            throw "Signature not found for $($msi.Name)"
+          }
+          Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
+
+          # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
+          $exeCandidates = if ($isArm64) {
+            @('src-tauri/target/aarch64-pc-windows-msvc/release/cc-switch.exe')
+          } else {
+            @(
+              'src-tauri/target/release/cc-switch.exe',
+              'src-tauri/target/x86_64-pc-windows-msvc/release/cc-switch.exe'
+            )
+          }
+          $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($null -ne $exePath) {
+            $portableDir = 'release-assets/CC-Switch-Mod-Portable'
+            New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+            Copy-Item $exePath $portableDir
+            $portableIniPath = Join-Path $portableDir 'portable.ini'
+            $portableContent = if ($isArm64) {
+              @('# CC Switch Mod portable ARM64 build marker', 'portable=true', 'arch=arm64')
+            } else {
+              @('# CC Switch Mod portable build marker', 'portable=true')
+            }
+            $portableContent | Set-Content -Path $portableIniPath -Encoding UTF8
+            $portableZip = "release-assets/CC-Switch-Mod-$VERSION-Windows$assetSuffix-Portable.zip"
+            Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+            Remove-Item -Recurse -Force $portableDir
+          } elseif ($isArm64) {
+            throw 'Portable ARM64 exe not found'
+          } else {
+            Write-Warning 'Portable exe not found'
+          }
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-Windows-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  # 两个 macOS 架构并行编译，再由 macos-release 合并成 universal 包。
+  macos-binary:
+    name: Build macOS binary (${{ matrix.target }})
+    needs: [version-check, whats-new-check]
+    runs-on: macos-15
+    environment: release
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          targets: ${{ matrix.target }}
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri App (${{ matrix.target }})
+        timeout-minutes: 60
+        run: pnpm tauri build --target ${{ matrix.target }} --no-bundle
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-binary-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/cc-switch
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-release:
+    name: Bundle macOS release (ad-hoc signed)
+    runs-on: macos-15
+    needs: macos-binary
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - name: Setup pnpm
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          corepack install
+          node --version
+          pnpm --version
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare Tauri signing key
+        uses: ./.github/actions/prepare-tauri-signing-key
+        with:
+          private-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Download macOS binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: macos-binary-*
+          path: macos-binaries
+
+      - name: Merge universal binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=src-tauri/target/universal-apple-darwin/release
+          mkdir -p "$out"
+          lipo -create -output "$out/cc-switch" \
+            macos-binaries/macos-binary-aarch64-apple-darwin/cc-switch \
+            macos-binaries/macos-binary-x86_64-apple-darwin/cc-switch
+          chmod +x "$out/cc-switch"
+          lipo -info "$out/cc-switch"
+
+      # 没有 Apple 开发者账号：只做 ad-hoc 签名。Tauri 在没有任何 Apple 凭据时会跳过
+      # 公证，同时仍然生成更新用的 .app.tar.gz 和 .sig。
+      - name: Bundle and ad-hoc sign (macOS)
+        shell: bash
+        timeout-minutes: 45
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          set -euo pipefail
+          pnpm tauri bundle --target universal-apple-darwin --bundles app
+
+      - name: Prepare macOS Assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release-assets
+          VERSION="${TAG#mod-v}"
+
+          TAR_GZ=""; APP_PATH=""
+          for path in \
+            "src-tauri/target/universal-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/aarch64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/macos" \
+            "src-tauri/target/release/bundle/macos"; do
+            if [ -d "$path" ]; then
+              [ -z "$TAR_GZ" ] && TAR_GZ=$(find "$path" -maxdepth 1 -name "*.tar.gz" -type f | head -1 || true)
+              [ -z "$APP_PATH" ] && APP_PATH=$(find "$path" -maxdepth 1 -name "*.app" -type d | head -1 || true)
+            fi
+          done
+
+          if [ -z "$TAR_GZ" ]; then
+            echo "❌ No macOS .tar.gz updater artifact found" >&2
+            exit 1
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ No .app found" >&2
+            exit 1
+          fi
+
+          # 1) Updater artifact
+          NEW_TAR_GZ="CC-Switch-Mod-${VERSION}-macOS.tar.gz"
+          cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
+          if [ ! -f "$TAR_GZ.sig" ]; then
+            echo "❌ Updater signature not found: $TAR_GZ.sig" >&2
+            exit 1
+          fi
+          cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig"
+
+          # 2) .app as zip
+          NEW_ZIP="CC-Switch-Mod-${VERSION}-macOS.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
+
+          # 3) Styled DMG
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
+          NEW_DMG="CC-Switch-Mod-${VERSION}-macOS.dmg"
+          DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$DMG_STAGE_DIR"
+          mkdir -p "$DMG_STAGE_DIR"
+          ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch Mod.app"
+
+          create-dmg \
+            --volname "CC Switch Mod" \
+            --background "src-tauri/icons/dmg-background.png" \
+            --window-size 660 400 \
+            --window-pos 200 120 \
+            --icon-size 80 \
+            --icon "CC Switch Mod.app" 180 220 \
+            --hide-extension "CC Switch Mod.app" \
+            --app-drop-link 480 220 \
+            --no-internet-enable \
+            "release-assets/$NEW_DMG" \
+            "$DMG_STAGE_DIR"
+
+          rm -rf "$DMG_STAGE_DIR"
+
+      - name: Verify ad-hoc signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name "*.app" -type d | head -1)
+          codesign --verify --deep --strict "$APP_PATH"
+          codesign -dv "$APP_PATH" 2>&1 | grep -E 'Signature|Identifier|TeamIdentifier' || true
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets-macOS
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-22.04
+    needs: [windows, macos-release]
+    # 只在推 tag 或手动 publish=true 时发布
+    if: github.event_name == 'push' || inputs.publish == true
+    permissions:
+      contents: write
+    steps:
+      - name: Download built release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Skip if release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing to publish."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate latest.json
+        if: steps.existing.outputs.exists == 'false'
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#mod-v}"
+          PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          base_url="https://github.com/$REPO/releases/download/$TAG"
+
+          find_artifact() {
+            local pattern="$1"
+            local file
+            file=$(find release-assets -maxdepth 1 -name "$pattern" -type f | head -1 || true)
+            [ -n "$file" ] || { echo "::error::Missing asset matching $pattern"; exit 1; }
+            echo "$(basename "$file")"
+          }
+
+          MAC_TGZ=$(find_artifact "*-macOS.tar.gz")
+          WIN_X64_MSI=$(find_artifact "*-Windows.msi")
+          WIN_ARM64_MSI=$(find_artifact "*-Windows-arm64.msi")
+
+          for f in "$MAC_TGZ" "$WIN_X64_MSI" "$WIN_ARM64_MSI"; do
+            if [ ! -f "release-assets/$f.sig" ]; then
+              echo "::error::Missing signature for $f"
+              exit 1
+            fi
+          done
+
+          mac_sig=$(cat "release-assets/$MAC_TGZ.sig")
+          win_x64_sig=$(cat "release-assets/$WIN_X64_MSI.sig")
+          win_arm64_sig=$(cat "release-assets/$WIN_ARM64_MSI.sig")
+
+          {
+            echo '{'
+            echo "  \"version\": \"$VERSION\","
+            echo "  \"notes\": \"Release $TAG\","
+            echo "  \"pub_date\": \"$PUB_DATE\","
+            echo '  "platforms": {'
+            echo "    \"darwin-aarch64\": {\"signature\": \"$mac_sig\", \"url\": \"$base_url/$MAC_TGZ\"},"
+            echo "    \"darwin-x86_64\": {\"signature\": \"$mac_sig\", \"url\": \"$base_url/$MAC_TGZ\"},"
+            echo "    \"windows-x86_64\": {\"signature\": \"$win_x64_sig\", \"url\": \"$base_url/$WIN_X64_MSI\"},"
+            echo "    \"windows-aarch64\": {\"signature\": \"$win_arm64_sig\", \"url\": \"$base_url/$WIN_ARM64_MSI\"}"
+            echo '  }'
+            echo '}'
+          } > release-assets/latest.json
+
+          cat release-assets/latest.json
+
+      - name: Create GitHub Release
+        if: steps.existing.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          name: CC Switch Mod ${{ env.TAG }}
+          prerelease: false
+          make_latest: true
+          files: release-assets/*
+          body: |
+            CC Switch Mod ${{ env.TAG }}
+
+            Fork of [farion1231/cc-switch](https://github.com/farion1231/cc-switch).
+            Version tracks the upstream stable release; see the upstream notes for the
+            corresponding changes.
+
+            **Windows**
+            - MSI installer (x64 / arm64)
+            - Portable zip (no installer, not used by the updater)
+
+            **macOS** (universal)
+            - DMG, ZIP
+            - The app is **ad-hoc signed and not notarized**. If macOS blocks it:
+              right-click the app and choose Open, or run
+              `xattr -dr com.apple.quarantine "/Applications/CC Switch Mod.app"`.
+
+            In-app updates use `latest.json` from this release.
