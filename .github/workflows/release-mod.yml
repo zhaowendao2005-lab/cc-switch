@@ -272,12 +272,13 @@ jobs:
           if-no-files-found: error
 
   # macOS 在单台 runner 上顺序编译两个架构，再合并为 universal 包。
-  # 只占用一个 macOS runner：GitHub 免费容量的 macOS arm64 runner 在并发时经常
-  # 排队超时被取消（"not acquired by Runner ... capacity constraints"）。
+  # 使用 Intel runner（macos-15-intel）：免费的 macOS arm64 runner（macos-15）
+  # 在并发时经常排队超时被取消（"not acquired by Runner ... capacity constraints"）。
+  # Intel 机器可以交叉编译 aarch64-apple-darwin，产出 universal 包不受影响。
   macos-release:
     name: Build macOS universal release (ad-hoc signed)
     needs: [version-check, whats-new-check]
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: release
     timeout-minutes: 180
     steps:
