@@ -271,15 +271,15 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-  # 两个 macOS 架构并行编译，再由 macos-release 合并成 universal 包。
-  macos-binary:
-    name: Build macOS binary (${{ matrix.target }})
+  # macOS 在单台 runner 上顺序编译两个架构，再合并为 universal 包。
+  # 只占用一个 macOS runner：GitHub 免费容量的 macOS arm64 runner 在并发时经常
+  # 排队超时被取消（"not acquired by Runner ... capacity constraints"）。
+  macos-release:
+    name: Build macOS universal release (ad-hoc signed)
     needs: [version-check, whats-new-check]
     runs-on: macos-15
     environment: release
-    strategy:
-      matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -303,7 +303,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Setup pnpm
         env:
@@ -317,69 +317,21 @@ jobs:
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build Tauri App (${{ matrix.target }})
-        timeout-minutes: 60
-        run: pnpm tauri build --target ${{ matrix.target }} --no-bundle
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-binary-${{ matrix.target }}
-          path: src-tauri/target/${{ matrix.target }}/release/cc-switch
-          if-no-files-found: error
-          retention-days: 1
-
-  macos-release:
-    name: Bundle macOS release (ad-hoc signed)
-    runs-on: macos-15
-    needs: macos-binary
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '20'
-
-      - name: Read pinned Rust toolchain
-        id: rust-toolchain
-        shell: bash
+      - name: Build aarch64 binary
+        timeout-minutes: 75
         run: |
-          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
-          test -n "$channel"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          pnpm tauri build --target aarch64-apple-darwin --no-bundle
+          cp src-tauri/target/aarch64-apple-darwin/release/cc-switch "$RUNNER_TEMP/cc-switch-aarch64"
+          # 释放 target 目录后再编译第二个架构，避免 runner 磁盘被两个 release 构建填满
+          cargo clean --manifest-path src-tauri/Cargo.toml
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
-
-      - name: Setup pnpm
-        env:
-          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      - name: Build x86_64 binary
+        timeout-minutes: 75
         run: |
-          corepack enable
-          corepack install
-          node --version
-          pnpm --version
-
-      - name: Install frontend deps
-        run: pnpm install --frozen-lockfile
-
-      - name: Prepare Tauri signing key
-        uses: ./.github/actions/prepare-tauri-signing-key
-        with:
-          private-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-
-      - name: Download macOS binaries
-        uses: actions/download-artifact@v8
-        with:
-          pattern: macos-binary-*
-          path: macos-binaries
+          set -euo pipefail
+          pnpm tauri build --target x86_64-apple-darwin --no-bundle
+          cp src-tauri/target/x86_64-apple-darwin/release/cc-switch "$RUNNER_TEMP/cc-switch-x86_64"
 
       - name: Merge universal binary
         shell: bash
@@ -388,10 +340,16 @@ jobs:
           out=src-tauri/target/universal-apple-darwin/release
           mkdir -p "$out"
           lipo -create -output "$out/cc-switch" \
-            macos-binaries/macos-binary-aarch64-apple-darwin/cc-switch \
-            macos-binaries/macos-binary-x86_64-apple-darwin/cc-switch
+            "$RUNNER_TEMP/cc-switch-aarch64" \
+            "$RUNNER_TEMP/cc-switch-x86_64"
           chmod +x "$out/cc-switch"
           lipo -info "$out/cc-switch"
+
+      - name: Prepare Tauri signing key
+        uses: ./.github/actions/prepare-tauri-signing-key
+        with:
+          private-key: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          password: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # 没有 Apple 开发者账号：只做 ad-hoc 签名。Tauri 在没有任何 Apple 凭据时会跳过
       # 公证，同时仍然生成更新用的 .app.tar.gz 和 .sig。
