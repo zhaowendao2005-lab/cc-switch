@@ -110,7 +110,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       }
 
       await settingsApi.openExternal(
-        `https://github.com/zhaowendao2005-lab/cc-switch/releases/tag/${displayVersion}`,
+        `https://github.com/zhaowendao2005-lab/cc-switch/releases/tag/mod-v${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
