@@ -574,6 +574,10 @@ If you launch from a desktop icon, add it to the `.desktop` `Exec=` line (e.g. `
 
 For more questions, see the [FAQ](docs/user-manual/en/5-faq/5.2-questions.md) in the User Manual.
 
+## Mod development
+
+This fork follows upstream stable releases and publishes Windows x64/ARM64 + macOS universal builds from GitHub Actions. See [.rules/README.md](.rules/README.md) for identity, database fallback, signing, release, and upstream-sync rules.
+
 ## Contributing
 
 Issues and suggestions are welcome! Before developing a new feature, please open an issue to discuss the approach first; feature PRs that aren't a good fit for the project may be closed.
