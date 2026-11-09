@@ -13,9 +13,14 @@
 |---|---|
 | Windows x64 | `windows-2022`, MSI + portable zip |
 | Windows ARM64 | `windows-11-arm`, MSI |
-| macOS | universal (`lipo` of aarch64 + x86_64), DMG + ZIP + updater `.app.tar.gz` |
+| macOS | `macos-15-intel`, one job builds aarch64 + x86_64 sequentially, `lipo` into universal, DMG + ZIP + updater `.app.tar.gz` |
 
 No Linux builds.
+
+Do not switch macOS back to `macos-15`/`macos-latest`: those are arm64 runners whose
+free pool regularly cancels queued jobs after the queue timeout. The Intel runner is
+available and can cross-compile `aarch64-apple-darwin`. Build one architecture at a
+time and `cargo clean` between them so the runner disk is not exhausted.
 
 ## macOS signing
 
