@@ -25,11 +25,16 @@
 
 pub(crate) mod backup;
 mod dao;
+pub(crate) mod fallback_sync;
 mod migration;
 mod schema;
+pub(crate) mod selector;
 
 #[cfg(test)]
 mod tests;
+
+pub use fallback_sync::DatabaseStatus;
+pub use selector::select_active_database;
 
 // DAO 类型导出供外部使用
 pub use dao::custom_icons::{CustomIconEntry, CUSTOM_ICONS_KEY};
@@ -45,6 +50,7 @@ use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use rusqlite::{hooks::Action, Connection};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
@@ -52,6 +58,11 @@ use std::sync::Mutex;
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
 pub(crate) const SCHEMA_VERSION: i32 = 24;
+
+/// 主数据库文件名（与官方版共用）
+pub const PRIMARY_DB_FILENAME: &str = "cc-switch.db";
+/// fork 私有备用数据库文件名
+pub const FALLBACK_DB_FILENAME: &str = "mod_cc-switch.db";
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -79,6 +90,10 @@ pub struct Database {
     pub(crate) conn: Mutex<Connection>,
     /// 请求日志总数缓存，见 `services::usage_stats::LogCountCache`
     pub(crate) log_count_cache: Mutex<Option<crate::services::usage_stats::LogCountCache>>,
+    /// 当前打开的数据库文件
+    pub(crate) path: PathBuf,
+    /// 是否正在使用 fork 私有备用数据库
+    pub(crate) is_fallback: bool,
 }
 
 fn register_db_change_hook(conn: &Connection) {
@@ -94,23 +109,64 @@ fn register_db_change_hook(conn: &Connection) {
 }
 
 impl Database {
+    /// 主数据库路径（与官方版共用）
+    pub fn primary_path() -> PathBuf {
+        get_app_config_dir().join(PRIMARY_DB_FILENAME)
+    }
+
+    /// fork 私有备用数据库路径
+    pub fn fallback_path() -> PathBuf {
+        get_app_config_dir().join(FALLBACK_DB_FILENAME)
+    }
+
+    /// 当前打开的数据库路径
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 是否正在使用备用数据库
+    pub fn is_fallback(&self) -> bool {
+        self.is_fallback
+    }
+
     /// 初始化数据库连接并创建表
     ///
     /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
     pub fn init() -> Result<Self, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
-        let db_exists = db_path.exists();
+        Self::init_with_path(&Self::primary_path(), false)
+    }
+
+    /// 用指定路径初始化数据库。
+    ///
+    /// 重要：版本检查必须在 `create_tables()` 之前完成。`create_tables()` 会执行
+    /// ALTER/DROP 等 DDL，绝不能对读不懂的更新版数据库落写。
+    pub fn init_with_path(db_path: &Path, is_fallback: bool) -> Result<Self, AppError> {
+        let db_exists = db_path
+            .metadata()
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false);
 
         // 确保父目录存在
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = Connection::open(db_path).map_err(|e| AppError::Database(e.to_string()))?;
 
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // 先读版本，再做任何 DDL
+        let initial_version = Self::get_user_version(&conn)?;
+        if initial_version > SCHEMA_VERSION {
+            return Err(AppError::DatabaseVersionTooNew {
+                path: db_path.display().to_string(),
+                version: initial_version,
+                supported: SCHEMA_VERSION,
+            });
+        }
+
         if !db_exists {
             // For a brand-new database, configure incremental auto-vacuum
             // before creating any tables so no rebuild is needed later.
@@ -122,6 +178,8 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
             log_count_cache: Mutex::new(None),
+            path: db_path.to_path_buf(),
+            is_fallback,
         };
         db.create_tables()?;
 
@@ -186,6 +244,8 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
             log_count_cache: Mutex::new(None),
+            path: PathBuf::new(),
+            is_fallback: false,
         };
         db.create_tables()?;
         db.ensure_model_pricing_seeded()?;

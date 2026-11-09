@@ -220,6 +220,26 @@ pub async fn delete_db_backup(filename: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 当前数据库状态（主库/备用库、版本、同步标记）
+#[tauri::command]
+pub async fn get_database_status(
+    state: State<'_, AppState>,
+) -> Result<crate::database::DatabaseStatus, String> {
+    Ok(crate::database::fallback_sync::status(&state.db))
+}
+
+/// 人工强制把主库快照到备用库（覆盖前会先留一份 mod_db_backup_*）
+#[tauri::command]
+pub async fn force_sync_database(state: State<'_, AppState>) -> Result<String, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::database::fallback_sync::force_sync(&db).map(|path| path.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
 // ─── Backup storage overview ─────────────────────────────────
 
 /// 列出本机各类备份的位置与大小

@@ -1162,6 +1162,28 @@
     },
     "data": {
       "location": "儲存位置"
+    },
+    "databaseStatus": {
+      "title": "資料庫狀態",
+      "description": "顯示目前使用的是共享主資料庫還是 fork 私有備用資料庫，以及單向同步的狀態。",
+      "loading": "正在讀取資料庫狀態…",
+      "unavailable": "資料庫狀態不可用。",
+      "modePrimary": "正在使用共享主資料庫",
+      "modeFallback": "正在使用 fork 備用資料庫",
+      "fallbackExplanation": "主資料庫與目前版本不相容（例如官方版升級過資料庫），fork 已切換到私有副本以保持可用。主資料庫未被改動。",
+      "primaryLabel": "主庫",
+      "fallbackLabel": "備用庫",
+      "stateMissing": "不存在",
+      "stateCompatible": "相容",
+      "stateOlder": "偏舊",
+      "stateTooNew": "過新",
+      "stateUnusable": "不可用",
+      "lastSync": "上次同步",
+      "dirtyHint": "備用庫有本地改動，自動同步已暫停。",
+      "forceSync": "強制同步 主庫 → 備用庫",
+      "forceSyncConfirm": "用主庫快照覆蓋備用庫？操作前會先為備用庫建立安全備份。",
+      "forceSyncSuccess": "備用庫已同步。",
+      "forceSyncFailed": "同步失敗：{{error}}"
     }
   },
   "apps": {

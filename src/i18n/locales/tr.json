@@ -1128,6 +1128,28 @@
     },
     "data": {
       "location": "Konum"
+    },
+    "databaseStatus": {
+      "title": "Veritabanı Durumu",
+      "description": "Uygulamanın paylaşılan birincil veritabanını mı yoksa fork'un özel yedek veritabanını mı kullandığını ve tek yönlü eşitleme durumunu gösterir.",
+      "loading": "Veritabanı durumu yükleniyor…",
+      "unavailable": "Veritabanı durumu kullanılamıyor.",
+      "modePrimary": "Paylaşılan birincil veritabanı kullanılıyor",
+      "modeFallback": "Fork yedek veritabanı kullanılıyor",
+      "fallbackExplanation": "Birincil veritabanı bu sürümle uyumlu değil (örneğin resmi uygulama veritabanını yükseltti). Kullanılabilir kalmak için fork özel kopyasına geçti. Birincil veritabanı değiştirilmedi.",
+      "primaryLabel": "Birincil",
+      "fallbackLabel": "Yedek",
+      "stateMissing": "yok",
+      "stateCompatible": "uyumlu",
+      "stateOlder": "eski",
+      "stateTooNew": "çok yeni",
+      "stateUnusable": "kullanılamaz",
+      "lastSync": "Son eşitleme",
+      "dirtyHint": "Yedekte yerel değişiklikler var; otomatik eşitleme duraklatıldı.",
+      "forceSync": "Birincil → yedek zorla eşitle",
+      "forceSyncConfirm": "Yedek veritabanı birincil veritabanının anlık görüntüsüyle üzerine yazılsın mı? Önce güvenlik yedeği oluşturulur.",
+      "forceSyncSuccess": "Yedek veritabanı eşitlendi.",
+      "forceSyncFailed": "Eşitleme başarısız: {{error}}"
     }
   },
   "apps": {

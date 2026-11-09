@@ -1161,6 +1161,28 @@
     },
     "data": {
       "location": "Location"
+    },
+    "databaseStatus": {
+      "title": "Database Status",
+      "description": "Shows whether the app is using the shared primary database or the fork's private fallback database, and the state of the one-way sync.",
+      "loading": "Loading database status…",
+      "unavailable": "Database status is unavailable.",
+      "modePrimary": "Using the shared primary database",
+      "modeFallback": "Using the fork's fallback database",
+      "fallbackExplanation": "The primary database is not compatible with this build (for example, the official app upgraded it). The fork switched to its private copy so it stays usable. The primary database is left untouched.",
+      "primaryLabel": "Primary",
+      "fallbackLabel": "Fallback",
+      "stateMissing": "missing",
+      "stateCompatible": "compatible",
+      "stateOlder": "older",
+      "stateTooNew": "too new",
+      "stateUnusable": "unusable",
+      "lastSync": "Last sync",
+      "dirtyHint": "Fallback has local changes; automatic sync is paused.",
+      "forceSync": "Force sync primary → fallback",
+      "forceSyncConfirm": "Overwrite the fallback database with a snapshot of the primary database? A safety backup of the fallback is created first.",
+      "forceSyncSuccess": "Fallback database synced.",
+      "forceSyncFailed": "Sync failed: {{error}}"
     }
   },
   "apps": {

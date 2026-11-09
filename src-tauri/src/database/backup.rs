@@ -232,8 +232,12 @@ impl Database {
         // device-local rows can miss writes that arrived during staging.
         let backup_path = {
             let mut main_conn = lock_conn!(self.conn);
-            let backup_path =
-                Self::backup_database_file_from_conn(&backup_file_guard, &main_conn, &[])?;
+            let backup_path = Self::backup_database_file_from_conn(
+                &backup_file_guard,
+                &self.path,
+                &main_conn,
+                &[],
+            )?;
             if !preserve_tables.is_empty() {
                 Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
             }
@@ -416,7 +420,11 @@ impl Database {
         let interval_hours = crate::settings::effective_backup_interval_hours();
         if interval_hours > 0 {
             let backup_file_guard = lock_backup_file_operations()?;
-            let backup_dir = get_app_config_dir().join("backups");
+            let backup_dir = self
+                .path
+                .parent()
+                .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
+                .join("backups");
             if !backup_dir.exists() {
                 self.backup_database_file_locked(&backup_file_guard)?;
             } else {
@@ -481,18 +489,20 @@ impl Database {
         backup_file_guard: &BackupFileOperationGuard,
     ) -> Result<Option<PathBuf>, AppError> {
         let conn = lock_conn!(self.conn);
-        Self::backup_database_file_from_conn(backup_file_guard, &conn, &[])
+        Self::backup_database_file_from_conn(backup_file_guard, &self.path, &conn, &[])
     }
 
     /// Create a safety backup from a connection whose caller already owns both
     /// the backup-file operation guard and the appropriate database guard.
     fn backup_database_file_from_conn(
         backup_file_guard: &BackupFileOperationGuard,
+        db_path: &Path,
         source_conn: &Connection,
         protected_paths: &[&Path],
     ) -> Result<Option<PathBuf>, AppError> {
         Self::backup_database_file_from_conn_with_hook(
             backup_file_guard,
+            db_path,
             source_conn,
             protected_paths,
             |_, _| Ok(()),
@@ -501,6 +511,7 @@ impl Database {
 
     fn backup_database_file_from_conn_with_hook<F>(
         _backup_file_guard: &BackupFileOperationGuard,
+        db_path: &Path,
         source_conn: &Connection,
         protected_paths: &[&Path],
         before_publish: F,
@@ -508,7 +519,6 @@ impl Database {
     where
         F: FnOnce(&Path, &Path) -> Result<(), AppError>,
     {
-        let db_path = get_app_config_dir().join("cc-switch.db");
         if !db_path.exists() {
             return Ok(None);
         }
@@ -520,7 +530,16 @@ impl Database {
 
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
-        let base_id = format!("db_backup_{}", Local::now().format("%Y%m%d_%H%M%S"));
+        let prefix = if db_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("mod_"))
+        {
+            "mod_db_backup_"
+        } else {
+            "db_backup_"
+        };
+        let base_id = format!("{prefix}{}", Local::now().format("%Y%m%d_%H%M%S"));
         let mut next_suffix = 0;
         let mut backup_path =
             Self::next_available_backup_path(&backup_dir, &base_id, &mut next_suffix);
@@ -1021,7 +1040,11 @@ impl Database {
         }
 
         let backup_file_guard = lock_backup_file_operations()?;
-        let backup_dir = get_app_config_dir().join("backups");
+        let backup_dir = self
+            .path
+            .parent()
+            .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
+            .join("backups");
         let backup_path = backup_dir.join(filename);
 
         if !backup_path.exists() {
@@ -1068,6 +1091,7 @@ impl Database {
             let mut main_conn = lock_conn!(self.conn);
             let safety_backup = Self::backup_database_file_from_conn(
                 &backup_file_guard,
+                &self.path,
                 &main_conn,
                 &[backup_path.as_path()],
             )?;
@@ -2427,6 +2451,7 @@ mod tests {
             let conn = crate::database::lock_conn!(db.conn);
             Database::backup_database_file_from_conn_with_hook(
                 &backup_file_guard,
+                &db.path,
                 &conn,
                 &[],
                 |temp_path, target_path| {
@@ -2478,6 +2503,7 @@ mod tests {
             let conn = crate::database::lock_conn!(db.conn);
             Database::backup_database_file_from_conn_with_hook(
                 &backup_file_guard,
+                &db.path,
                 &conn,
                 &[],
                 |_, target_path| {

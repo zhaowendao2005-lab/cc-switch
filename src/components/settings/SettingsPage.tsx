@@ -34,6 +34,7 @@ import { AppPageHeader } from "@/components/shell/AppPageHeader";
 import { DirectoryInput } from "@/components/settings/DirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
 import { BackupListSection } from "@/components/settings/BackupListSection";
+import { DatabaseStatusSection } from "@/components/settings/DatabaseStatusSection";
 import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 import { RoutingSection } from "@/components/settings/sections/RoutingSection";
@@ -465,6 +466,17 @@ export function SettingsPage({
                   onExport={exportConfig}
                   onClear={clearSelection}
                 />
+              </div>
+            </SettingsBlock>
+            <SettingsBlock
+              title={t("settings.databaseStatus.title")}
+              help={{
+                title: t("settings.databaseStatus.title"),
+                body: t("settings.databaseStatus.description"),
+              }}
+            >
+              <div className="rounded-panel border border-border bg-surface p-5">
+                <DatabaseStatusSection />
               </div>
             </SettingsBlock>
             <SettingsBlock

@@ -1161,6 +1161,28 @@
     },
     "data": {
       "location": "保存場所"
+    },
+    "databaseStatus": {
+      "title": "データベースの状態",
+      "description": "共有の主データベースと fork 専用のフォールバックデータベースのどちらを使用しているか、および一方向同期の状態を表示します。",
+      "loading": "データベースの状態を読み込み中…",
+      "unavailable": "データベースの状態を取得できません。",
+      "modePrimary": "共有の主データベースを使用中",
+      "modeFallback": "fork のフォールバックデータベースを使用中",
+      "fallbackExplanation": "主データベースがこのビルドと互換性がありません（公式アプリがデータベースを更新した可能性があります）。利用を継続するため fork の専用コピーに切り替えました。主データベースは変更されていません。",
+      "primaryLabel": "主",
+      "fallbackLabel": "フォールバック",
+      "stateMissing": "なし",
+      "stateCompatible": "互換",
+      "stateOlder": "古い",
+      "stateTooNew": "新しすぎる",
+      "stateUnusable": "使用不可",
+      "lastSync": "最終同期",
+      "dirtyHint": "フォールバックにローカル変更があります。自動同期は停止しています。",
+      "forceSync": "主 → フォールバックを強制同期",
+      "forceSyncConfirm": "主データベースのスナップショットでフォールバックを上書きしますか？先に安全バックアップを作成します。",
+      "forceSyncSuccess": "フォールバックを同期しました。",
+      "forceSyncFailed": "同期に失敗しました: {{error}}"
     }
   },
   "apps": {

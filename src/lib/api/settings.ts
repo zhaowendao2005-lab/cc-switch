@@ -424,6 +424,31 @@ export interface BackupEntry {
   createdAt: string;
 }
 
+/** 主库 / 备用库探测结果 */
+export type DatabaseProbeState =
+  | "missing"
+  | "compatible"
+  | "older"
+  | "tooNew"
+  | "unusable";
+
+export interface DatabaseProbe {
+  path: string;
+  exists: boolean;
+  state: DatabaseProbeState;
+  version?: number | null;
+  error?: string | null;
+}
+
+export interface DatabaseStatus {
+  activePath: string;
+  isFallback: boolean;
+  primary: DatabaseProbe;
+  fallback: DatabaseProbe;
+  fallbackDirty: boolean;
+  lastSyncAt?: number | null;
+}
+
 export interface BackupLocation {
   id: string;
   path: string;
@@ -452,6 +477,15 @@ export const backupsApi = {
 
   async deleteDbBackup(filename: string): Promise<void> {
     await invoke("delete_db_backup", { filename });
+  },
+
+  async getDatabaseStatus(): Promise<DatabaseStatus> {
+    return await invoke("get_database_status");
+  },
+
+  /** 强制把主库快照到备用库，返回备用库路径 */
+  async forceSyncDatabase(): Promise<string> {
+    return await invoke("force_sync_database");
   },
 
   async listBackupLocations(): Promise<BackupLocation[]> {

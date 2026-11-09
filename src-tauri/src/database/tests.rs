@@ -1531,3 +1531,168 @@ fn migration_v23_to_v24_adds_dsh_flags_without_changing_omp_or_skill_state() {
             .get::<_, bool>(0))
         .unwrap());
 }
+
+// ============================================================
+// 主库 / fork 备用库选择
+// ============================================================
+
+mod fallback_selection {
+    use super::*;
+    use crate::database::selector::{probe_database, select_active_database, DatabaseProbeState};
+    use crate::database::{FALLBACK_DB_FILENAME, PRIMARY_DB_FILENAME};
+
+    fn make_db(path: &std::path::Path, version: i32) {
+        let conn = Connection::open(path).expect("open db");
+        conn.execute("CREATE TABLE sentinel (id INTEGER PRIMARY KEY)", [])
+            .expect("create sentinel");
+        Database::set_user_version(&conn, version).expect("set version");
+    }
+
+    #[test]
+    fn probe_missing_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = probe_database(&dir.path().join("nope.db"));
+        assert_eq!(probe.state, DatabaseProbeState::Missing);
+        assert!(!probe.exists);
+    }
+
+    #[test]
+    fn probe_zero_byte_is_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.db");
+        std::fs::write(&path, b"").unwrap();
+        let probe = probe_database(&path);
+        assert_eq!(probe.state, DatabaseProbeState::Compatible);
+        assert!(probe.exists);
+    }
+
+    #[test]
+    fn probe_exact_version_is_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.db");
+        make_db(&path, SCHEMA_VERSION);
+        let probe = probe_database(&path);
+        assert_eq!(probe.state, DatabaseProbeState::Compatible);
+        assert_eq!(probe.version, Some(SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn probe_future_version_is_too_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.db");
+        make_db(&path, SCHEMA_VERSION + 1);
+        let probe = probe_database(&path);
+        assert_eq!(probe.state, DatabaseProbeState::TooNew);
+        assert_eq!(probe.version, Some(SCHEMA_VERSION + 1));
+    }
+
+    #[test]
+    fn probe_corrupt_file_is_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.db");
+        std::fs::write(&path, b"definitely not a sqlite database").unwrap();
+        let probe = probe_database(&path);
+        assert_eq!(probe.state, DatabaseProbeState::Unusable);
+    }
+
+    #[test]
+    fn selector_prefers_compatible_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        make_db(&dir.path().join(PRIMARY_DB_FILENAME), SCHEMA_VERSION);
+        let selection = select_active_database(dir.path()).expect("select");
+        assert!(!selection.is_fallback);
+        assert!(selection.path.ends_with(PRIMARY_DB_FILENAME));
+    }
+
+    #[test]
+    fn selector_uses_fallback_when_primary_too_new() {
+        let dir = tempfile::tempdir().unwrap();
+        make_db(&dir.path().join(PRIMARY_DB_FILENAME), SCHEMA_VERSION + 5);
+        let selection = select_active_database(dir.path()).expect("select");
+        assert!(selection.is_fallback);
+        assert!(selection.path.ends_with(FALLBACK_DB_FILENAME));
+        // 主库在探测阶段不应被改动
+        let conn = Connection::open(dir.path().join(PRIMARY_DB_FILENAME)).unwrap();
+        assert_eq!(
+            Database::get_user_version(&conn).unwrap(),
+            SCHEMA_VERSION + 5
+        );
+    }
+
+    #[test]
+    fn selector_uses_fallback_when_primary_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PRIMARY_DB_FILENAME), b"garbage").unwrap();
+        let selection = select_active_database(dir.path()).expect("select");
+        assert!(selection.is_fallback);
+    }
+
+    #[test]
+    fn selector_uses_primary_when_both_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let selection = select_active_database(dir.path()).expect("select");
+        assert!(!selection.is_fallback);
+        assert!(selection.path.ends_with(PRIMARY_DB_FILENAME));
+    }
+
+    #[test]
+    fn selector_errors_when_both_too_new() {
+        let dir = tempfile::tempdir().unwrap();
+        make_db(&dir.path().join(PRIMARY_DB_FILENAME), SCHEMA_VERSION + 1);
+        make_db(&dir.path().join(FALLBACK_DB_FILENAME), SCHEMA_VERSION + 1);
+        let failure = select_active_database(dir.path()).expect_err("both too new");
+        assert!(failure.has_too_new());
+        assert_eq!(failure.observed_version(), Some(SCHEMA_VERSION + 1));
+    }
+
+    #[test]
+    fn selector_copies_older_primary_to_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join(PRIMARY_DB_FILENAME);
+        make_db(&primary, SCHEMA_VERSION - 1);
+        let selection = select_active_database(dir.path()).expect("select");
+        assert!(selection.is_fallback);
+        let fallback = dir.path().join(FALLBACK_DB_FILENAME);
+        assert!(fallback.exists(), "fallback should be seeded from primary");
+        // 主库仍是旧版本，没有被原地迁移
+        let conn = Connection::open(&primary).unwrap();
+        assert_eq!(
+            Database::get_user_version(&conn).unwrap(),
+            SCHEMA_VERSION - 1
+        );
+    }
+
+    #[test]
+    fn init_with_path_rejects_future_version_before_ddl() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.db");
+        make_db(&path, SCHEMA_VERSION + 1);
+
+        let err = match Database::init_with_path(&path, false) {
+            Ok(_) => panic!("should reject a newer database"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, AppError::DatabaseVersionTooNew { .. }),
+            "unexpected error: {err}"
+        );
+
+        // 哨兵表必须还在，且没有创建任何新表（init 在 DDL 之前就返回了）
+        let conn = Connection::open(&path).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1, "no tables should be created for a newer DB");
+        assert!(conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='sentinel'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .is_ok());
+    }
+}

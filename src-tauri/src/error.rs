@@ -57,6 +57,12 @@ pub enum AppError {
     },
     #[error("数据库错误: {0}")]
     Database(String),
+    #[error("数据库版本过新（{version}），当前应用仅支持 {supported}：{path}")]
+    DatabaseVersionTooNew {
+        path: String,
+        version: i32,
+        supported: i32,
+    },
     #[error("OMO 配置文件不存在")]
     OmoConfigNotFound,
     #[error("所有供应商已熔断，无可用渠道")]

@@ -1161,6 +1161,28 @@
     },
     "data": {
       "location": "存储位置"
+    },
+    "databaseStatus": {
+      "title": "数据库状态",
+      "description": "显示当前使用的是共享主数据库还是 fork 私有备用数据库，以及单向同步的状态。",
+      "loading": "正在读取数据库状态…",
+      "unavailable": "数据库状态不可用。",
+      "modePrimary": "正在使用共享主数据库",
+      "modeFallback": "正在使用 fork 备用数据库",
+      "fallbackExplanation": "主数据库与当前版本不兼容（例如官方版升级过数据库），fork 已切换到私有副本以保证可用。主数据库未被改动。",
+      "primaryLabel": "主库",
+      "fallbackLabel": "备用库",
+      "stateMissing": "不存在",
+      "stateCompatible": "兼容",
+      "stateOlder": "偏旧",
+      "stateTooNew": "过新",
+      "stateUnusable": "不可用",
+      "lastSync": "上次同步",
+      "dirtyHint": "备用库存在本地改动，自动同步已暂停。",
+      "forceSync": "强制同步 主库 → 备用库",
+      "forceSyncConfirm": "用主库快照覆盖备用库？操作前会先为备用库创建一份安全备份。",
+      "forceSyncSuccess": "备用库已同步。",
+      "forceSyncFailed": "同步失败：{{error}}"
     }
   },
   "apps": {

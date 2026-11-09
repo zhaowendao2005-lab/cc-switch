@@ -291,7 +291,7 @@ fn runtime_log_level_allows(level: log::Level, max_level: log::LevelFilter) -> b
     max_level.to_level().is_some_and(|maximum| level <= maximum)
 }
 
-/// 统一处理 ccswitch:// 深链接 URL
+/// 统一处理 ccswitchmod://（兼容 ccswitch://）深链接 URL
 ///
 /// - 解析 URL，把结果（或错误）暂存为待处理深链接，再发 `deeplink-pending` 通知前端来读
 ///   （前端可能还没挂载，见 `deeplink::PendingDeepLink`）
@@ -302,7 +302,7 @@ fn handle_deeplink_url(
     focus_main_window: bool,
     source: &str,
 ) -> bool {
-    if !url_str.starts_with("ccswitch://") {
+    if !crate::deeplink::is_deeplink_url(url_str) {
         return false;
     }
 
@@ -638,7 +638,7 @@ pub fn run() {
 
                 // 用户配置存在数据库中，数据库尚未打开时使用保守的 Info 级别。
                 log::set_max_level(log::LevelFilter::Info);
-                log::info!("=== CC Switch v{} started ===", env!("CARGO_PKG_VERSION"));
+                log::info!("=== CC Switch Mod v{} started ===", env!("CARGO_PKG_VERSION"));
             }
 
             #[cfg(unix)]
@@ -670,7 +670,54 @@ pub fn run() {
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
-            let db_path = app_config_dir.join("cc-switch.db");
+
+            // 先只读探测主库/备用库，决定这次使用哪一个。
+            // 主库版本与 SCHEMA_VERSION 不严格相等时不会原地迁移，避免破坏官方版仍在使用的共享库。
+            let selection = match crate::database::select_active_database(&app_config_dir) {
+                Ok(selection) => selection,
+                Err(failure) => {
+                    let observed = failure.observed_version();
+                    let kind = if failure.has_too_new() {
+                        "db_version_too_new"
+                    } else {
+                        "db_unusable"
+                    };
+                    log::warn!("数据库恢复界面：{}", failure.reason);
+                    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+                        path: app_config_dir
+                            .join(crate::database::PRIMARY_DB_FILENAME)
+                            .display()
+                            .to_string(),
+                        error: failure.reason.clone(),
+                        kind: Some(kind.to_string()),
+                        db_version: observed,
+                        supported_version: Some(crate::database::SCHEMA_VERSION),
+                    });
+                    // 主窗口默认 visible:false，恢复界面必须强制显示
+                    if let Some(window) = app.get_webview_window("main") {
+                        #[cfg(target_os = "windows")]
+                        {
+                            let _ = window.set_skip_taskbar(false);
+                        }
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                    return Ok(());
+                }
+            };
+
+            let db_path = selection.path.clone();
+            let is_fallback = selection.is_fallback;
+            log::info!(
+                "Database selection: {} ({}) primary={:?}/{:?} fallback={:?}/{:?}",
+                db_path.display(),
+                selection.reason,
+                selection.primary.state,
+                selection.primary.version,
+                selection.fallback.state,
+                selection.fallback.version
+            );
+
             let json_path = app_config_dir.join("config.json");
 
             // 检查是否需要从 config.json 迁移到 SQLite
@@ -706,46 +753,18 @@ pub fn run() {
                 None
             };
 
+            // 备用库被选中时，先落盘 dirty 标记再打开它，防止自动同步覆盖用户数据。
+            if is_fallback {
+                crate::database::fallback_sync::mark_dirty_on_selection();
+            }
+
             // 现在创建数据库（包含 Schema 迁移）
             //
             // 说明：从 v3.8.* 升级的用户通常会走到这里的 SQLite schema 迁移，
             // 若迁移失败（数据库损坏/权限不足/user_version 过新等），需要给用户明确提示，
             // 否则表现可能只是“应用打不开/闪退”。
-            //
-            // 预检：数据库版本过新时，必须先于任何 schema 写操作（create_tables 内含
-            // DROP/ALTER 等 DDL）进入恢复界面，避免旧应用对读不懂的更新版 DB 落写。
-            match crate::database::Database::stored_user_version_exceeds_supported(&db_path) {
-                Ok(Some(version)) => {
-                    log::warn!("数据库版本过新（v{version}），引导用户在应用内升级应用");
-                    crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
-                        path: db_path.display().to_string(),
-                        error: format!(
-                            "数据库版本过新（{version}），当前应用仅支持 {}，请升级应用后再尝试。",
-                            crate::database::SCHEMA_VERSION
-                        ),
-                        kind: Some("db_version_too_new".to_string()),
-                        db_version: Some(version),
-                        supported_version: Some(crate::database::SCHEMA_VERSION),
-                    });
-                    // 主窗口默认 visible:false，恢复界面必须强制显示
-                    if let Some(window) = app.get_webview_window("main") {
-                        #[cfg(target_os = "windows")]
-                        {
-                            let _ = window.set_skip_taskbar(false);
-                        }
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                    return Ok(());
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    log::warn!("预检数据库版本失败，继续正常初始化流程: {e}");
-                }
-            }
-
             let db = loop {
-                match crate::database::Database::init() {
+                match crate::database::Database::init_with_path(&db_path, is_fallback) {
                     Ok(db) => break Arc::new(db),
                     Err(e) => {
                         log::error!("Failed to init database: {e}");
@@ -1285,7 +1304,7 @@ pub fn run() {
             // Linux（AppIndicator）不派发点击事件，只能出原生菜单，菜单里有一项打开面板。
             let native_menu = tray_panel::uses_native_menu();
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("CC Switch") // 鼠标悬停提示
+                .tooltip("CC Switch Mod") // 鼠标悬停提示
                 .on_tray_icon_event(tray::handle_tray_icon_event)
                 .on_menu_event(|app, event| {
                     tray::handle_tray_menu_event(app, &event.id.0);
@@ -1321,7 +1340,9 @@ pub fn run() {
                 app.handle().clone(),
             );
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
+            let db_for_fallback_sync = app_state.db.clone();
             app.manage(app_state);
+            crate::database::fallback_sync::start_worker(db_for_fallback_sync);
             app.manage(services::kimi_oauth::KimiOAuthManager::default());
 
             // 初始化 SkillService
@@ -1743,6 +1764,8 @@ pub fn run() {
             commands::restore_db_backup,
             commands::rename_db_backup,
             commands::delete_db_backup,
+            commands::get_database_status,
+            commands::force_sync_database,
             commands::sync_current_providers_live,
             // Deep link import
             commands::parse_deeplink,
