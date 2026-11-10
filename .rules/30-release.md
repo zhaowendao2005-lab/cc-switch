@@ -13,14 +13,31 @@
 |---|---|
 | Windows x64 | `windows-2022`, MSI + portable zip |
 | Windows ARM64 | `windows-11-arm`, MSI |
-| macOS | `macos-15-intel`, one job builds aarch64 + x86_64 sequentially, `lipo` into universal, DMG + ZIP + updater `.app.tar.gz` |
+| macOS | `macos-15-intel`, `macos-compile` matrix builds aarch64 + x86_64 in parallel, `macos-release` `lipo`s them into universal + DMG/ZIP/updater `.app.tar.gz` |
 
 No Linux builds.
 
 Do not switch macOS back to `macos-15`/`macos-latest`: those are arm64 runners whose
 free pool regularly cancels queued jobs after the queue timeout. The Intel runner is
-available and can cross-compile `aarch64-apple-darwin`. Build one architecture at a
-time and `cargo clean` between them so the runner disk is not exhausted.
+available and can cross-compile `aarch64-apple-darwin`, so both matrix jobs run on
+`macos-15-intel` and each builds a single architecture.
+
+`macos-compile` only produces a binary (uploaded as a short-lived artifact);
+`macos-release` downloads both, merges them with `lipo`, and does the bundling,
+ad-hoc signing and asset packaging. Keep the packaging job free of Rust compilation
+so a cache miss or slow compile cannot delay it.
+
+## Build caching
+
+- Rust dependencies are cached with `Swatinem/rust-cache`, one cache per target
+  (`key: release-<target>`); the action keys on OS/arch, rustc version and the
+  dependency set in `Cargo.lock`.
+- Caches are saved only on publish runs (tag push or `publish=true`); dry-runs restore
+  read-only so a test run cannot evict the real caches.
+- The pnpm store is cached through `actions/setup-node` (`cache: pnpm`); this is why
+  `pnpm/action-setup` must run before `setup-node`.
+- GitHub gives a repository 10 GB of cache in total, shared with CI. Treat a cache miss
+  as a slower build only: never make the workflow depend on a cache hit.
 
 ## macOS signing
 

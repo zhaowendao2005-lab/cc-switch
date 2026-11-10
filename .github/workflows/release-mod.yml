@@ -5,6 +5,11 @@
 #
 # macOS 不做 Apple 签名/公证（没有开发者账号），使用 ad-hoc 签名（APPLE_SIGNING_IDENTITY="-"）。
 # Tauri 的更新签名（minisign）与 Apple 签名无关，仍然由 TAURI_SIGNING_PRIVATE_KEY 完成。
+#
+# 构建耗时主要来自 700 多个依赖 crate 的编译，因此：
+# - Rust 依赖用 Swatinem/rust-cache 缓存，按目标架构分开 key（只在真正发布时保存）；
+# - 前端依赖用 setup-node 的 pnpm store 缓存；
+# - macOS 两个架构并行编译，最后在单独的 job 里 lipo 合并并打包。
 name: Release Mod
 
 on:
@@ -33,6 +38,8 @@ concurrency:
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  # 只有推 tag 或手动 publish=true 时才真正发布；dry-run 只读缓存不写缓存。
+  SAVE_CACHE: ${{ github.event_name == 'push' || inputs.publish == true }}
 
 jobs:
   version-check:
@@ -88,18 +95,15 @@ jobs:
         with:
           ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
 
+      # 版本取 package.json 的 packageManager；先装 pnpm，setup-node 才能按 pnpm-lock 缓存 store。
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '20'
-
-      - name: Setup pnpm
-        env:
-          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-        run: |
-          corepack enable
-          corepack install
-          pnpm --version
+          cache: pnpm
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -126,10 +130,14 @@ jobs:
         with:
           ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '20'
+          cache: pnpm
 
       # rust-toolchain.toml 是编译器版本的唯一来源
       - name: Read pinned Rust toolchain
@@ -150,14 +158,15 @@ jobs:
         shell: pwsh
         run: rustup target add aarch64-pc-windows-msvc
 
-      - name: Setup pnpm
-        env:
-          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-        run: |
-          corepack enable
-          corepack install
-          node --version
-          pnpm --version
+      # 只缓存依赖（本仓库的 crate 每次都要重编）。key 自带 OS/架构，两个矩阵任务互不干扰；
+      # lockfile 里的依赖没变时 key 稳定，命中后只需重编 cc-switch 自己。
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          key: release-windows-${{ matrix.arch }}
+          add-rust-environment-hash-key: true
+          save-if: ${{ env.SAVE_CACHE == 'true' }}
 
       - name: Setup LLVM for Windows ARM64
         if: matrix.arch == 'arm64'
@@ -271,26 +280,39 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
 
-  # macOS 在单台 runner 上顺序编译两个架构，再合并为 universal 包。
-  # 使用 Intel runner（macos-15-intel）：免费的 macOS arm64 runner（macos-15）
-  # 在并发时经常排队超时被取消（"not acquired by Runner ... capacity constraints"）。
-  # Intel 机器可以交叉编译 aarch64-apple-darwin，产出 universal 包不受影响。
-  macos-release:
-    name: Build macOS universal release (ad-hoc signed)
+  # macOS 两个架构并行编译：各自一台 Intel runner，只负责产出二进制，不做打包。
+  # 不用 macos-15/macos-latest：免费的 macOS arm64 runner 在并发时经常排队超时被取消
+  # （"not acquired by Runner ... capacity constraints"）。Intel runner 可以交叉编译
+  # aarch64-apple-darwin，产出的 universal 包不受影响。
+  macos-compile:
+    name: Compile macOS (${{ matrix.arch }})
     needs: [version-check, whats-new-check]
     runs-on: macos-15-intel
+    # 编译不需要 secret；挂 release environment 只是为了和各平台一起在开头确认一次。
     environment: release
-    timeout-minutes: 180
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '20'
+          cache: pnpm
 
       - name: Read pinned Rust toolchain
         id: rust-toolchain
@@ -304,48 +326,96 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
 
-      - name: Setup pnpm
-        env:
-          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
-        run: |
-          corepack enable
-          corepack install
-          node --version
-          pnpm --version
+      # 依赖编译是 release 构建的大头。key 里带上目标架构，两个 job 各自一份缓存；
+      # 只在真正发布时保存，dry-run 只读，避免挤占仓库 10 GB 的缓存配额。
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+          key: release-${{ matrix.target }}
+          add-rust-environment-hash-key: true
+          save-if: ${{ env.SAVE_CACHE == 'true' }}
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build aarch64 binary
-        timeout-minutes: 75
+      - name: Build ${{ matrix.arch }} binary
+        timeout-minutes: 90
         run: |
           set -euo pipefail
-          pnpm tauri build --target aarch64-apple-darwin --no-bundle
-          cp src-tauri/target/aarch64-apple-darwin/release/cc-switch "$RUNNER_TEMP/cc-switch-aarch64"
-          # 释放 target 目录后再编译第二个架构，避免 runner 磁盘被两个 release 构建填满
-          cargo clean --manifest-path src-tauri/Cargo.toml
+          pnpm tauri build --target ${{ matrix.target }} --no-bundle
+          cp "src-tauri/target/${{ matrix.target }}/release/cc-switch" "$RUNNER_TEMP/cc-switch"
 
-      - name: Build x86_64 binary
-        timeout-minutes: 75
+      - name: Upload compiled binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-binary-${{ matrix.arch }}
+          path: ${{ runner.temp }}/cc-switch
+          retention-days: 3
+          if-no-files-found: error
+
+  # 合并两个架构并打包：这里不再编译 Rust，只做 lipo、ad-hoc 签名和 DMG/ZIP/更新包。
+  macos-release:
+    name: Package macOS universal release (ad-hoc signed)
+    needs: [macos-compile]
+    runs-on: macos-15-intel
+    environment: release
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.ref) || env.TAG }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: pnpm
+
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
         run: |
-          set -euo pipefail
-          pnpm tauri build --target x86_64-apple-darwin --no-bundle
-          cp src-tauri/target/x86_64-apple-darwin/release/cc-switch "$RUNNER_TEMP/cc-switch-x86_64"
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      # tauri bundle 不编译 Rust，只需要 cargo 环境来定位 target 目录；不同架构的 std
+      # 不必装（universal 二进制是 lipo 出来的）。
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Download compiled binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: macos-binary-*
+          path: ${{ runner.temp }}/macos-binaries
 
       - name: Merge universal binary
         shell: bash
         run: |
           set -euo pipefail
+          src="$RUNNER_TEMP/macos-binaries"
           out=src-tauri/target/universal-apple-darwin/release
           mkdir -p "$out"
           lipo -create -output "$out/cc-switch" \
-            "$RUNNER_TEMP/cc-switch-aarch64" \
-            "$RUNNER_TEMP/cc-switch-x86_64"
+            "$src/macos-binary-aarch64/cc-switch" \
+            "$src/macos-binary-x86_64/cc-switch"
           chmod +x "$out/cc-switch"
           lipo -info "$out/cc-switch"
 
+      # 二进制里已经内嵌了前端资源，bundle 不会再调用 beforeBuildCommand，因此不需要 dist。
       - name: Prepare Tauri signing key
         uses: ./.github/actions/prepare-tauri-signing-key
         with:
